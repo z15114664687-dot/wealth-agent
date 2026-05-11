@@ -1,4 +1,6 @@
 import os
+import json
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,6 +23,33 @@ class GeminiReportClient:
             response = self._client.models.generate_content(model=self.model, contents=prompt)
             return (response.text or '').strip()
         return self._fallback(prompt)
+
+    def generate_json(self, prompt: str) -> dict:
+        if self.available and self._client is not None:
+            response = self._client.models.generate_content(model=self.model, contents=prompt)
+            return self._parse_json(response.text or '')
+        return {}
+
+    def _parse_json(self, text: str) -> dict:
+        cleaned = text.strip()
+        if not cleaned:
+            return {}
+
+        fenced = re.search(r'```(?:json)?\s*(.*?)\s*```', cleaned, re.S)
+        if fenced:
+            cleaned = fenced.group(1).strip()
+
+        start = cleaned.find('{')
+        end = cleaned.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            cleaned = cleaned[start:end + 1]
+
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return {}
+
+        return payload if isinstance(payload, dict) else {}
 
     def _fallback(self, prompt: str) -> str:
         return (

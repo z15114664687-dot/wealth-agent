@@ -8,7 +8,7 @@ import { ReportPanel } from '@/components/workspace/ReportPanel';
 import { AgentStatusRail } from '@/components/workspace/AgentStatusRail';
 import { PriceChart } from '@/components/workspace/PriceChart';
 import { generateResearch } from '@/lib/api';
-import { InvestmentHorizon, ResearchResponse, RiskProfile } from '@/lib/types';
+import { CompetitiveLandscape, InvestmentHorizon, ResearchResponse, RiskProfile } from '@/lib/types';
 import {
   getCompanyProfile,
   getCompetitiveLandscape,
@@ -33,8 +33,9 @@ const starter: ResearchResponse = {
   },
   signals: [
     { title: '趋势', value: '高于 MA20', interpretation: '短期价格结构仍偏建设性。' },
+    { title: '中期位置', value: '高于 MA60', interpretation: '股价仍与中期趋势保持一致。' },
+    { title: '30日收益', value: '+3.20%', interpretation: '近期表现为正。' },
     { title: '波动率', value: '中等', interpretation: '波动存在但尚未失序。' },
-    { title: '定位', value: '防御型质量资产', interpretation: '该标的仍呈现高质量防御型大盘股特征。' },
   ],
   report: '【WealthAgent AI 股票研究摘要】\n\n贵州茅台是 A 股高端白酒龙头，核心优势来自品牌稀缺性、渠道议价权和强现金流。当前研究视角下，系统会把行情信号、公司画像、财务质量、基本面驱动和竞争格局合并为一份面向投资者的结构化报告。\n\n本报告仅用于研究和教学展示，不构成投资建议。',
   agent_status: {
@@ -61,7 +62,27 @@ function enrichResearch(data: ResearchResponse): ResearchResponse {
     technical_stack: data.technical_stack || getTechnicalStack(data.ticker),
     financial_analysis: data.financial_analysis || getFinancialAnalysis(data.ticker),
     fundamental_analysis: data.fundamental_analysis || getFundamentalAnalysis(data.ticker),
-    competitive_landscape: data.competitive_landscape || getCompetitiveLandscape(data.ticker),
+    competitive_landscape: normalizeCompetitiveLandscape(data),
+  };
+}
+
+function normalizeCompetitiveLandscape(data: ResearchResponse): CompetitiveLandscape {
+  const fallback = getCompetitiveLandscape(data.ticker);
+  const landscape = data.competitive_landscape || fallback;
+  const competitors = Array.isArray(landscape.competitors)
+    ? landscape.competitors.filter((item) => item && (item.name || item.relative_position))
+    : [];
+
+  return {
+    position: landscape.position || fallback.position,
+    moat: landscape.moat || fallback.moat,
+    competitors: competitors.length > 0 ? competitors.map((item) => ({
+      name: item.name || '可比公司待验证',
+      ticker: item.ticker || '-',
+      angle: item.angle || '同业比较',
+      relative_position: item.relative_position || '相对位置需要结合研报和公开资料继续验证。',
+    })) : fallback.competitors,
+    summary: landscape.summary || fallback.summary,
   };
 }
 
@@ -139,11 +160,13 @@ export default function WorkspacePage() {
             <TechnicalPanel data={data} />
           </div>
 
-          <div className="grid items-stretch gap-6 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid items-stretch gap-6 lg:grid-cols-[minmax(360px,0.95fr)_minmax(0,1.05fr)]">
             <PriceChart history={data.price_history || []} compact />
-            {data.signals.map((signal) => (
-              <SignalCard key={signal.title} signal={signal} />
-            ))}
+            <div className="grid gap-6 sm:grid-cols-2 sm:grid-rows-2">
+              {data.signals.slice(0, 4).map((signal) => (
+                <SignalCard key={signal.title} signal={signal} />
+              ))}
+            </div>
           </div>
         </section>
       </div>

@@ -39,6 +39,14 @@ class ResearchAgentOrchestrator:
             financial_statement_snapshot,
         )
         report = self.report_client.generate_report(prompt)
+        competitive_landscape = self._build_competitive_landscape(
+            ticker,
+            company_name,
+            company_profile,
+            financial_analysis,
+            fundamental_analysis,
+            report,
+        )
 
         return {
             'ticker': ticker,
@@ -70,6 +78,7 @@ class ResearchAgentOrchestrator:
             'fundamental_analysis': fundamental_analysis,
             'financial_statement_snapshot': financial_statement_snapshot,
             'company_profile': company_profile,
+            'competitive_landscape': competitive_landscape,
         }
 
     def _build_signals(self, last_price: float, ma20: float, ma60: float, return_30d: float, volatility: float):
@@ -111,6 +120,119 @@ class ResearchAgentOrchestrator:
             'growth_driver': f'增长线索来自收入增速 {financial_analysis.get("revenue_growth", "N/A")} 与盈利能力变化，需要继续跟踪后续报告期。',
             'risk_watch': f'重点关注毛利率 {financial_analysis.get("gross_margin", "N/A")}、净利率 {financial_analysis.get("net_margin", "N/A")}、ROE {financial_analysis.get("roe", "N/A")} 和杠杆水平 {financial_analysis.get("leverage", "N/A")}。',
             'conclusion': f'基本面结论：{financial_analysis.get("summary", "财务数据暂不可用")} 三张表摘要：{statement_line}。',
+        }
+
+    def _build_competitive_landscape(self, ticker, company_name, company_profile, financial_analysis, fundamental_analysis, report):
+        prompt = self._build_competitive_landscape_prompt(
+            ticker,
+            company_name,
+            company_profile,
+            financial_analysis,
+            fundamental_analysis,
+            report,
+        )
+        try:
+            payload = self.report_client.generate_json(prompt)
+        except Exception as e:
+            print(f'[WARN] Gemini competitive landscape completion failed for {ticker}: {e}')
+            payload = {}
+        normalized = self._normalize_competitive_landscape(payload)
+        if normalized:
+            return normalized
+        return self._fallback_competitive_landscape(company_name, company_profile, report)
+
+    def _build_competitive_landscape_prompt(self, ticker, company_name, company_profile, financial_analysis, fundamental_analysis, report):
+        profile_block = '\n'.join([
+            f"行业: {company_profile.get('sector', 'N/A')}",
+            f"公司画像: {company_profile.get('style', 'N/A')}",
+            f"公司描述: {company_profile.get('description', 'N/A')}",
+            f"标签: {'、'.join(company_profile.get('tags', []))}",
+            f"观察点: {'；'.join(company_profile.get('watchpoints', []))}",
+        ])
+        fundamental_block = '\n'.join([f'{k}: {v}' for k, v in fundamental_analysis.items()])
+        return f"""
+你是 A 股研究助理。请基于以下已生成研报、公司画像和财务摘要，为前端“竞争格局”模板补全结构化内容。
+
+股票代码: {ticker}
+公司名称: {company_name}
+
+公司画像:
+{profile_block}
+
+财务摘要:
+收入增长: {financial_analysis.get('revenue_growth', 'N/A')}
+毛利率: {financial_analysis.get('gross_margin', 'N/A')}
+净利率: {financial_analysis.get('net_margin', 'N/A')}
+ROE: {financial_analysis.get('roe', 'N/A')}
+总结: {financial_analysis.get('summary', 'N/A')}
+
+基本面分析:
+{fundamental_block}
+
+已生成研报:
+{report}
+
+只输出合法 JSON，不要 markdown，不要解释。JSON schema:
+{{
+  "position": "一句话说明该公司的行业位置；信息不足时写待验证，不要编造",
+  "moat": "一句话说明护城河或竞争变量；信息不足时写待验证",
+  "competitors": [
+    {{"name": "可比公司或竞争方名称", "ticker": "代码未知可写-", "angle": "比较角度", "relative_position": "与目标公司的相对位置，需谨慎"}}
+  ],
+  "summary": "2-3 句总结竞争格局，必须说明需要结合研报和公开资料继续验证"
+}}
+
+要求:
+- 中文输出
+- competitors 输出 2 到 3 个
+- 不确定的竞品代码用 "-"
+- 不构成投资建议
+""".strip()
+
+    def _normalize_competitive_landscape(self, payload):
+        if not isinstance(payload, dict):
+            return None
+
+        competitors = payload.get('competitors')
+        if not isinstance(competitors, list):
+            competitors = []
+
+        normalized_competitors = []
+        for item in competitors[:3]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '可比公司待验证').strip()
+            normalized_competitors.append({
+                'name': name or '可比公司待验证',
+                'ticker': str(item.get('ticker') or '-').strip() or '-',
+                'angle': str(item.get('angle') or '同业比较').strip() or '同业比较',
+                'relative_position': str(item.get('relative_position') or '相对位置需要结合研报和公开资料继续验证。').strip() or '相对位置需要结合研报和公开资料继续验证。',
+            })
+
+        if len(normalized_competitors) < 2:
+            return None
+
+        return {
+            'position': str(payload.get('position') or '行业位置需要结合研报和公开资料继续验证。').strip(),
+            'moat': str(payload.get('moat') or '竞争优势需要结合行业份额、盈利能力和产品差异化继续验证。').strip(),
+            'competitors': normalized_competitors,
+            'summary': str(payload.get('summary') or '竞争格局为研究补全内容，需要结合后续研报、公告和可比公司数据继续验证。').strip(),
+            'source': 'gemini-research-completion',
+        }
+
+    def _fallback_competitive_landscape(self, company_name, company_profile, report):
+        sector = company_profile.get('sector', '行业待确认')
+        watchpoints = company_profile.get('watchpoints') or ['行业份额', '盈利质量', '现金流稳定性']
+        report_hint = '研报已生成，可在正文的竞争格局小节中继续核对。' if report else '研报正文暂不可用。'
+        return {
+            'position': f'{company_name} 所处 {sector}，具体行业位置需要结合研报、公告和可比公司数据继续验证。',
+            'moat': f'竞争优势暂按 {company_profile.get("style", "通用研究样本")} 处理，重点复核 {watchpoints[0]}。',
+            'competitors': [
+                {'name': '可比公司 A', 'ticker': '-', 'angle': '同业比较', 'relative_position': '需要根据研报或行业数据库补充市场份额、盈利能力和估值差异。'},
+                {'name': '可比公司 B', 'ticker': '-', 'angle': '替代路线', 'relative_position': '需要进一步验证产品、客户、区域和成本结构差异。'},
+            ],
+            'summary': f'当前为竞争格局兜底模板。{report_hint} 本模块仅用于研究辅助，不构成投资建议。',
+            'source': 'fallback',
         }
 
     def _build_prompt(self, ticker, company_name, risk_profile, last_price, ma20, ma60, return_30d, volatility, signals, source, financial_analysis, statement_snapshot):
