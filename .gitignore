@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# TypeScript / test caches
+*.tsbuildinfo
+coverage/
+.pytest_cache/

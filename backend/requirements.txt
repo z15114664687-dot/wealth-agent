@@ -1,0 +1,9 @@
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-dotenv>=1.0.1
+pandas>=2.2.2
+numpy>=1.26.4
+yfinance>=0.2.54
+tushare>=1.4.19
+google-genai>=1.10.0
+akshare>=1.18.60

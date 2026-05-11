@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: #ffffff;
+  color: #050505;
+  overflow-x: hidden;
+}
+
+::selection {
+  background: #050505;
+  color: #ccff00;
+}
+
+.grid-lines {
+  background-image:
+    linear-gradient(to right, rgba(0,0,0,0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0,0,0,0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.text-stroke {
+  -webkit-text-stroke: 1px rgba(0,0,0,0.12);
+}
