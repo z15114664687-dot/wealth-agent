@@ -60,6 +60,7 @@ export interface CompetitiveLandscape {
   moat: string;
   competitors: Array<{ name: string; ticker: string; angle: string; relative_position: string }>;
   summary: string;
+  source?: string;
 }
 
 export interface SignalItem {

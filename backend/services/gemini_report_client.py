@@ -20,14 +20,20 @@ class GeminiReportClient:
 
     def generate_report(self, prompt: str) -> str:
         if self.available and self._client is not None:
-            response = self._client.models.generate_content(model=self.model, contents=prompt)
-            return (response.text or '').strip()
+            try:
+                response = self._client.models.generate_content(model=self.model, contents=prompt)
+                return (response.text or '').strip()
+            except Exception as e:
+                print(f'[WARN] Gemini report generation failed: {e}')
         return self._fallback(prompt)
 
     def generate_json(self, prompt: str) -> dict:
         if self.available and self._client is not None:
-            response = self._client.models.generate_content(model=self.model, contents=prompt)
-            return self._parse_json(response.text or '')
+            try:
+                response = self._client.models.generate_content(model=self.model, contents=prompt)
+                return self._parse_json(response.text or '')
+            except Exception as e:
+                print(f'[WARN] Gemini JSON generation failed: {e}')
         return {}
 
     def _parse_json(self, text: str) -> dict:

@@ -83,6 +83,7 @@ function normalizeCompetitiveLandscape(data: ResearchResponse): CompetitiveLands
       relative_position: item.relative_position || '相对位置需要结合研报和公开资料继续验证。',
     })) : fallback.competitors,
     summary: landscape.summary || fallback.summary,
+    source: landscape.source || fallback.source || 'frontend-fallback',
   };
 }
 
@@ -231,8 +232,16 @@ function FundamentalPanel({ data }: { data: ResearchResponse }) {
 
 function CompetitionPanel({ data }: { data: ResearchResponse }) {
   const landscape = data.competitive_landscape!;
+  const sourceLabel = landscape.source === 'gemini-research-completion'
+    ? 'Gemini 补全'
+    : landscape.source === 'fallback'
+      ? '后端兜底'
+      : '本地模板';
   return (
     <Panel eyebrow="COMPETITIVE LANDSCAPE" title="竞争格局" shadow="shadow-hard-blue">
+      <div className="mb-5 inline-flex rounded-md border-2 border-ink bg-acid px-3 py-2 text-[10px] font-bold uppercase tracking-[0.12em]">
+        {sourceLabel}
+      </div>
       <div className="grid gap-4 md:grid-cols-2">
         <TextBlock title="行业位置" text={landscape.position} />
         <TextBlock title="护城河" text={landscape.moat} />
