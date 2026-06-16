@@ -1,8 +1,10 @@
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,10 +13,86 @@ class ChinaMarketDataProvider:
     def __init__(self):
         self.tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
 
+    def resolve_symbol(self, symbol: str) -> Dict[str, str]:
+        raw = (symbol or '').strip()
+        clean = raw.upper().replace(' ', '')
+        clean = clean.replace('HK:', '').replace('US:', '')
+
+        if clean.endswith(('.SH', '.SZ', '.BJ')):
+            code = clean.split('.')[0]
+            return {
+                'raw': raw,
+                'market': 'CN',
+                'normalized': code,
+                'display_symbol': code,
+                'yahoo_symbol': self._to_yahoo_code(code),
+                'hk_code': '',
+            }
+
+        if clean.endswith('.HK'):
+            digits = re.sub(r'\D', '', clean.split('.')[0])
+            hk_code = digits.zfill(5)
+            yahoo_code = str(int(digits)).zfill(4) if digits else hk_code[-4:]
+            return {
+                'raw': raw,
+                'market': 'HK',
+                'normalized': hk_code,
+                'display_symbol': f'{hk_code}.HK',
+                'yahoo_symbol': f'{yahoo_code}.HK',
+                'hk_code': hk_code,
+            }
+
+        if clean.isdigit() and len(clean) == 6:
+            return {
+                'raw': raw,
+                'market': 'CN',
+                'normalized': clean,
+                'display_symbol': clean,
+                'yahoo_symbol': self._to_yahoo_code(clean),
+                'hk_code': '',
+            }
+
+        if clean.isdigit() and 1 <= len(clean) <= 5:
+            hk_code = clean.zfill(5)
+            yahoo_code = str(int(clean)).zfill(4)
+            return {
+                'raw': raw,
+                'market': 'HK',
+                'normalized': hk_code,
+                'display_symbol': f'{hk_code}.HK',
+                'yahoo_symbol': f'{yahoo_code}.HK',
+                'hk_code': hk_code,
+            }
+
+        us_symbol = clean[:-3] if clean.endswith('.US') else clean
+        return {
+            'raw': raw,
+            'market': 'US',
+            'normalized': us_symbol,
+            'display_symbol': us_symbol,
+            'yahoo_symbol': us_symbol,
+            'hk_code': '',
+        }
+
     def get_stock_history(self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+        resolved = self.resolve_symbol(symbol)
         end = pd.Timestamp(end_date) if end_date else pd.Timestamp.today().normalize()
         start = pd.Timestamp(start_date) if start_date else end - pd.Timedelta(days=180)
 
+        if resolved['market'] != 'CN':
+            try:
+                df = self._get_history_from_yahoo_chart(resolved, start, end)
+                if not df.empty:
+                    df['source'] = f"yahoo-chart-{resolved['market'].lower()}"
+                    return df
+            except Exception as e:
+                print(f'[WARN] Yahoo chart failed for {symbol}: {e}')
+
+            df = self._get_mock_history(resolved['display_symbol'], start, end, resolved['market'])
+            df['source'] = f'mock-{resolved["market"].lower()}'
+            return df
+
+        symbol = resolved['normalized']
         try:
             df = self._get_history_from_tushare(symbol, start, end)
             if not df.empty:
@@ -31,15 +109,37 @@ class ChinaMarketDataProvider:
         except Exception as e:
             print(f'[WARN] yfinance failed for {symbol}: {e}')
 
-        df = self._get_mock_history(symbol, start, end)
+        df = self._get_mock_history(symbol, start, end, 'CN')
         df['source'] = 'mock'
         return df
 
     def get_company_name(self, symbol: str) -> str:
+        resolved = self.resolve_symbol(symbol)
+        if resolved['market'] != 'CN':
+            quote = self._get_global_quote(resolved)
+            if quote.get('name'):
+                return quote['name']
+            mapping = {
+                'AAPL': 'Apple Inc.',
+                'MSFT': 'Microsoft',
+                'TSLA': 'Tesla',
+                'NVDA': 'NVIDIA',
+                'BABA': 'Alibaba',
+                '00700.HK': '腾讯控股',
+                '09988.HK': '阿里巴巴-W',
+            }
+            return mapping.get(resolved['display_symbol'], resolved['display_symbol'])
+
+        symbol = resolved['normalized']
         mapping = {'600519': '贵州茅台', '300750': '宁德时代', '000001': '平安银行', '600036': '招商银行', '601899': '紫金矿业', '002594': '比亚迪'}
         return mapping.get(symbol, f'A-Share {symbol}')
 
     def get_company_profile(self, symbol: str, financial_analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        resolved = self.resolve_symbol(symbol)
+        if resolved['market'] != 'CN':
+            return self._get_global_company_profile(resolved, financial_analysis or {})
+
+        symbol = resolved['normalized']
         try:
             profile = self._get_company_profile_from_akshare(symbol, financial_analysis or {})
             if profile:
@@ -63,6 +163,11 @@ class ChinaMarketDataProvider:
         }
 
     def get_financial_analysis(self, symbol: str) -> Dict[str, Any]:
+        resolved = self.resolve_symbol(symbol)
+        if resolved['market'] != 'CN':
+            return self._get_global_financial_analysis(resolved)
+
+        symbol = resolved['normalized']
         try:
             indicators = self._get_financial_indicators_from_akshare(symbol)
             if indicators:
@@ -82,6 +187,11 @@ class ChinaMarketDataProvider:
         }
 
     def get_financial_statement_snapshot(self, symbol: str) -> Dict[str, Any]:
+        resolved = self.resolve_symbol(symbol)
+        if resolved['market'] != 'CN':
+            return self._get_global_financial_statement_snapshot(resolved)
+
+        symbol = resolved['normalized']
         try:
             return self._get_financial_statement_snapshot_from_akshare(symbol)
         except Exception as e:
@@ -100,12 +210,162 @@ class ChinaMarketDataProvider:
     def _to_sina_code(self, symbol: str) -> str:
         return f'sh{symbol}' if symbol.startswith(('5', '6', '9')) else f'sz{symbol}'
 
+    def _get_history_from_yahoo_chart(self, resolved: Dict[str, str], start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        period1 = int(start.timestamp())
+        period2 = int((end + pd.Timedelta(days=1)).timestamp())
+        url = f'https://query2.finance.yahoo.com/v8/finance/chart/{resolved["yahoo_symbol"]}'
+        params = {'period1': period1, 'period2': period2, 'interval': '1d'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'}
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        r.raise_for_status()
+        chart = (r.json().get('chart', {}).get('result') or [{}])[0]
+        timestamps = chart.get('timestamp') or []
+        quote = (chart.get('indicators', {}).get('quote') or [{}])[0]
+        rows = []
+        for i, ts in enumerate(timestamps):
+            close = self._safe_float(self._list_get(quote.get('close'), i))
+            if close is None:
+                continue
+            rows.append({
+                'date': pd.to_datetime(datetime.fromtimestamp(ts).date()),
+                'open': self._safe_float(self._list_get(quote.get('open'), i)) or close,
+                'high': self._safe_float(self._list_get(quote.get('high'), i)) or close,
+                'low': self._safe_float(self._list_get(quote.get('low'), i)) or close,
+                'close': close,
+                'volume': self._safe_float(self._list_get(quote.get('volume'), i)) or 0,
+            })
+        if not rows:
+            raise ValueError('Empty dataframe returned from Yahoo chart')
+        df = pd.DataFrame(rows)
+        df['pct_change'] = df['close'].pct_change().fillna(0) * 100
+        df['turnover'] = np.nan
+        return df[['date', 'open', 'high', 'low', 'close', 'volume', 'pct_change', 'turnover']]
+
+    def _get_global_quote(self, resolved: Dict[str, str]) -> Dict[str, Any]:
+        try:
+            if resolved['market'] == 'US':
+                return self._get_us_quote_tencent(resolved['normalized'])
+            if resolved['market'] == 'HK':
+                return self._get_hk_quote_tencent(resolved['hk_code'])
+        except Exception as e:
+            print(f'[WARN] Tencent global quote failed for {resolved["display_symbol"]}: {e}')
+        return {}
+
+    def _get_us_quote_tencent(self, ticker: str) -> Dict[str, Any]:
+        url = f'https://qt.gtimg.cn/q=us{ticker.upper()}'
+        r = requests.get(url, timeout=10)
+        r.encoding = 'gbk'
+        match = re.search(r'"(.+)"', r.text)
+        if not match:
+            return {}
+        fields = match.group(1).split('~')
+        if len(fields) < 57:
+            return {}
+        return {
+            'name': fields[1] or fields[27] or ticker.upper(),
+            'name_en': fields[27] if len(fields) > 27 else ticker.upper(),
+            'price': self._safe_float(fields[3]),
+            'change_pct': self._safe_float(fields[32]),
+            'market_cap': self._safe_float(fields[44]),
+            'pe': self._safe_float(fields[53]),
+            'pb': self._safe_float(fields[56]),
+            'currency': 'USD',
+        }
+
+    def _get_hk_quote_tencent(self, code: str) -> Dict[str, Any]:
+        url = f'https://qt.gtimg.cn/q=r_hk{code}'
+        r = requests.get(url, timeout=10)
+        r.encoding = 'gbk'
+        match = re.search(r'"(.+)"', r.text)
+        if not match:
+            return {}
+        fields = match.group(1).split('~')
+        if len(fields) < 57:
+            return {}
+        return {
+            'name': fields[1] or fields[2] or code,
+            'name_en': fields[2] if len(fields) > 2 else code,
+            'price': self._safe_float(fields[3]),
+            'change_pct': self._safe_float(fields[32]),
+            'market_cap': self._safe_float(fields[44]),
+            'pe': self._safe_float(fields[39]),
+            'pb': self._safe_float(fields[56]),
+            'currency': 'HKD',
+        }
+
+    def _get_global_financial_analysis(self, resolved: Dict[str, str]) -> Dict[str, Any]:
+        quote = self._get_global_quote(resolved)
+        market_label = '美股' if resolved['market'] == 'US' else '港股'
+        pe = quote.get('pe')
+        pb = quote.get('pb')
+        mcap = quote.get('market_cap')
+        summary_parts = [
+            f'{market_label}标的 {resolved["display_symbol"]} 已按全球市场数据源处理。',
+        ]
+        if pe:
+            summary_parts.append(f'腾讯财经口径 PE 约 {pe:.2f}。')
+        if pb:
+            summary_parts.append(f'PB 约 {pb:.2f}。')
+        if mcap:
+            unit = '亿美元' if resolved['market'] == 'US' else '亿港元'
+            summary_parts.append(f'市值约 {mcap:.2f}{unit}。')
+        if len(summary_parts) == 1:
+            summary_parts.append('实时估值字段暂不可用，报告会以价格历史与公开研究框架为主。')
+        return {
+            'revenue_growth': '待验证',
+            'gross_margin': '待验证',
+            'net_margin': '待验证',
+            'roe': '待验证',
+            'operating_cashflow': '待验证',
+            'leverage': '待验证',
+            'summary': ''.join(summary_parts),
+            'source': f'global-{resolved["market"].lower()}-quote',
+            'pe': f'{pe:.2f}' if pe else 'N/A',
+            'pb': f'{pb:.2f}' if pb else 'N/A',
+        }
+
+    def _get_global_financial_statement_snapshot(self, resolved: Dict[str, str]) -> Dict[str, Any]:
+        quote = self._get_global_quote(resolved)
+        unit = '亿美元' if resolved['market'] == 'US' else '亿港元'
+        items = {
+            '最新价': self._fmt_optional_number(quote.get('price')),
+            '市值': f"{quote.get('market_cap'):.2f} {unit}" if quote.get('market_cap') else 'N/A',
+            'PE': self._fmt_optional_number(quote.get('pe')),
+            'PB': self._fmt_optional_number(quote.get('pb')),
+        }
+        return {
+            'source': f'global-{resolved["market"].lower()}-quote',
+            'latest_report': None,
+            'items': items,
+        }
+
+    def _get_global_company_profile(self, resolved: Dict[str, str], financial_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        quote = self._get_global_quote(resolved)
+        market_label = '美股' if resolved['market'] == 'US' else '港股'
+        name = quote.get('name') or resolved['display_symbol']
+        currency = quote.get('currency') or ('USD' if resolved['market'] == 'US' else 'HKD')
+        pe = financial_analysis.get('pe') or 'N/A'
+        pb = financial_analysis.get('pb') or 'N/A'
+        return {
+            'sector': f'{market_label} / 行业待验证',
+            'style': '全球市场研究样本',
+            'description': f'{name}（{resolved["display_symbol"]}）按 {market_label} 数据源处理，当前页面使用 Yahoo K线与腾讯财经行情字段生成研究框架。',
+            'tags': [market_label, '全球市场', '研究'],
+            'valuation': [
+                {'label': '市场', 'value': market_label},
+                {'label': '币种', 'value': currency},
+                {'label': 'PE', 'value': pe},
+                {'label': 'PB', 'value': pb},
+            ],
+            'watchpoints': ['收入与利润增长', '估值与同业比较', '汇率与市场流动性'],
+            'dataNotes': ['K线优先来自 Yahoo chart。', '实时行情和估值字段优先来自腾讯财经；财报深度字段可后续接入 Yahoo quoteSummary / SEC / 东财 datacenter。'],
+        }
+
     def _get_history_from_tushare(self, symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         if not self.tushare_token:
             raise ValueError('TUSHARE_TOKEN missing')
         import tushare as ts
-        ts.set_token(self.tushare_token)
-        pro = ts.pro_api()
+        pro = ts.pro_api(self.tushare_token)
         df = pro.daily(ts_code=self._to_tushare_code(symbol), start_date=start.strftime('%Y%m%d'), end_date=end.strftime('%Y%m%d'))
         if df is None or df.empty:
             raise ValueError('Empty dataframe returned from Tushare')
@@ -126,9 +386,15 @@ class ChinaMarketDataProvider:
         hist['turnover'] = np.nan
         return hist[['date','open','high','low','close','volume','pct_change','turnover']]
 
-    def _get_mock_history(self, symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    def _get_mock_history(self, symbol: str, start: pd.Timestamp, end: pd.Timestamp, market: str = 'CN') -> pd.DataFrame:
         dates = pd.date_range(start=start, end=end, freq='B')
-        base = 1600 if symbol == '600519' else 200 if symbol == '300750' else 12 if symbol == '000001' else 50
+        base = (
+            1600 if symbol == '600519'
+            else 200 if symbol in {'300750', 'AAPL', 'MSFT', 'TSLA'}
+            else 300 if market == 'HK'
+            else 12 if symbol == '000001'
+            else 50
+        )
         rng = np.random.default_rng(abs(hash(symbol)) % (2**32))
         trend = np.linspace(0, base * 0.06, len(dates))
         noise = rng.normal(0, base * 0.012, len(dates)).cumsum() * 0.15
@@ -337,6 +603,29 @@ class ChinaMarketDataProvider:
         if value is None or pd.isna(value):
             return 'N/A'
         return f'{float(value):.2f}'
+
+    def _fmt_optional_number(self, value) -> str:
+        if value is None:
+            return 'N/A'
+        try:
+            return f'{float(value):.2f}'
+        except (TypeError, ValueError):
+            return 'N/A'
+
+    def _safe_float(self, value):
+        if value in (None, '', '-'):
+            return None
+        try:
+            if pd.isna(value):
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _list_get(self, values, index):
+        if not values or index >= len(values):
+            return None
+        return values[index]
 
     def _fmt_money(self, value) -> str:
         if value is None or pd.isna(value):

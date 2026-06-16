@@ -19,10 +19,12 @@ import {
 
 const starter: ResearchResponse = {
   ticker: '600519',
+  market: 'CN',
   company_name: '贵州茅台',
   data_source: 'demo',
   snapshot: {
     ticker: '600519',
+    market: 'CN',
     company_name: '贵州茅台',
     data_source: 'demo',
     last_price: 1688.5,
@@ -120,7 +122,8 @@ export default function WorkspacePage() {
               先生成报告结论，再沿财务分析、基本面分析和竞争格局三条主线下钻；运行状态和技术信号放在辅助区，避免抢占主阅读路径。
             </p>
           </div>
-          <div className="grid gap-3 text-xs font-bold uppercase tracking-[0.12em] sm:grid-cols-3 lg:w-[520px]">
+          <div className="grid gap-3 text-xs font-bold uppercase tracking-[0.12em] sm:grid-cols-4 lg:w-[640px]">
+            <StatusChip label="市场" value={marketLabel(data.market || data.snapshot.market)} />
             <StatusChip label="数据源" value={data.data_source} />
             <StatusChip label="期限" value={horizon === 'Medium Term' ? '中期' : horizon === 'Short Term' ? '短期' : '长期'} />
             <StatusChip label="引擎" value="Gemini" />
@@ -314,6 +317,12 @@ function StatusChip({ label, value }: { label: string; value: string }) {
       <div className="mt-1 truncate text-sm text-ink">{value}</div>
     </div>
   );
+}
+
+function marketLabel(market?: string) {
+  if (market === 'US') return '美股';
+  if (market === 'HK') return '港股';
+  return 'A 股';
 }
 
 function Panel({

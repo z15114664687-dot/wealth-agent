@@ -3,6 +3,7 @@ export type InvestmentHorizon = 'Short Term' | 'Medium Term' | 'Long Term';
 
 export interface StockSnapshot {
   ticker: string;
+  market?: string;
   company_name: string;
   data_source: string;
   last_price: number;
@@ -78,6 +79,7 @@ export interface AgentStatus {
 
 export interface ResearchResponse {
   ticker: string;
+  market?: string;
   company_name: string;
   data_source: string;
   snapshot: StockSnapshot;

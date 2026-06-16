@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 from pydantic import BaseModel
 
 class ResearchRequest(BaseModel):
@@ -12,6 +12,7 @@ class SignalItem(BaseModel):
 
 class StockSnapshot(BaseModel):
     ticker: str
+    market: Optional[str] = None
     company_name: str
     data_source: str
     last_price: float
@@ -28,6 +29,7 @@ class AgentStatus(BaseModel):
 
 class ResearchResponse(BaseModel):
     ticker: str
+    market: Optional[str] = None
     company_name: str
     data_source: str
     snapshot: StockSnapshot

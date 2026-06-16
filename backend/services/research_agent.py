@@ -9,8 +9,11 @@ class ResearchAgentOrchestrator:
         self.report_client = GeminiReportClient()
 
     def run(self, ticker: str, risk_profile: str):
-        df = self.provider.get_stock_history(ticker)
-        company_name = self.provider.get_company_name(ticker)
+        symbol = self.provider.resolve_symbol(ticker)
+        display_ticker = symbol['display_symbol']
+        market_label = self._market_label(symbol['market'])
+        df = self.provider.get_stock_history(display_ticker)
+        company_name = self.provider.get_company_name(display_ticker)
         close = df['close'].astype(float)
         last_price = float(close.iloc[-1])
         ma20 = float(close.tail(20).mean())
@@ -18,15 +21,16 @@ class ResearchAgentOrchestrator:
         return_30d = float((close.iloc[-1] / close.iloc[max(0, len(close)-30)] - 1) * 100) if len(close) > 30 else float(close.pct_change().tail(30).sum() * 100)
         volatility = float(close.pct_change().dropna().std() * np.sqrt(252) * 100)
         source = str(df['source'].iloc[-1])
-        financial_analysis = self.provider.get_financial_analysis(ticker)
-        financial_statement_snapshot = self.provider.get_financial_statement_snapshot(ticker)
-        company_profile = self.provider.get_company_profile(ticker, financial_analysis)
+        financial_analysis = self.provider.get_financial_analysis(display_ticker)
+        financial_statement_snapshot = self.provider.get_financial_statement_snapshot(display_ticker)
+        company_profile = self.provider.get_company_profile(display_ticker, financial_analysis)
         fundamental_analysis = self._build_fundamental_analysis(company_name, financial_analysis, financial_statement_snapshot)
 
         signals = self._build_signals(last_price, ma20, ma60, return_30d, volatility)
         prompt = self._build_prompt(
-            ticker,
+            display_ticker,
             company_name,
+            market_label,
             risk_profile,
             last_price,
             ma20,
@@ -40,8 +44,9 @@ class ResearchAgentOrchestrator:
         )
         report = self.report_client.generate_report(prompt)
         competitive_landscape = self._build_competitive_landscape(
-            ticker,
+            display_ticker,
             company_name,
+            market_label,
             company_profile,
             financial_analysis,
             fundamental_analysis,
@@ -49,11 +54,13 @@ class ResearchAgentOrchestrator:
         )
 
         return {
-            'ticker': ticker,
+            'ticker': display_ticker,
+            'market': symbol['market'],
             'company_name': company_name,
             'data_source': source,
             'snapshot': {
-                'ticker': ticker,
+                'ticker': display_ticker,
+                'market': symbol['market'],
                 'company_name': company_name,
                 'data_source': source,
                 'last_price': round(last_price, 2),
@@ -122,10 +129,14 @@ class ResearchAgentOrchestrator:
             'conclusion': f'基本面结论：{financial_analysis.get("summary", "财务数据暂不可用")} 三张表摘要：{statement_line}。',
         }
 
-    def _build_competitive_landscape(self, ticker, company_name, company_profile, financial_analysis, fundamental_analysis, report):
+    def _market_label(self, market: str) -> str:
+        return 'A 股' if market == 'CN' else '美股' if market == 'US' else '港股'
+
+    def _build_competitive_landscape(self, ticker, company_name, market_label, company_profile, financial_analysis, fundamental_analysis, report):
         prompt = self._build_competitive_landscape_prompt(
             ticker,
             company_name,
+            market_label,
             company_profile,
             financial_analysis,
             fundamental_analysis,
@@ -141,7 +152,7 @@ class ResearchAgentOrchestrator:
             return normalized
         return self._fallback_competitive_landscape(company_name, company_profile, report)
 
-    def _build_competitive_landscape_prompt(self, ticker, company_name, company_profile, financial_analysis, fundamental_analysis, report):
+    def _build_competitive_landscape_prompt(self, ticker, company_name, market_label, company_profile, financial_analysis, fundamental_analysis, report):
         profile_block = '\n'.join([
             f"行业: {company_profile.get('sector', 'N/A')}",
             f"公司画像: {company_profile.get('style', 'N/A')}",
@@ -151,9 +162,10 @@ class ResearchAgentOrchestrator:
         ])
         fundamental_block = '\n'.join([f'{k}: {v}' for k, v in fundamental_analysis.items()])
         return f"""
-你是 A 股研究助理。请基于以下已生成研报、公司画像和财务摘要，为前端“竞争格局”模板补全结构化内容。
+你是{market_label}研究助理。请基于以下已生成研报、公司画像和财务摘要，为前端“竞争格局”模板补全结构化内容。
 
 股票代码: {ticker}
+市场: {market_label}
 公司名称: {company_name}
 
 公司画像:
@@ -235,15 +247,16 @@ ROE: {financial_analysis.get('roe', 'N/A')}
             'source': 'fallback',
         }
 
-    def _build_prompt(self, ticker, company_name, risk_profile, last_price, ma20, ma60, return_30d, volatility, signals, source, financial_analysis, statement_snapshot):
+    def _build_prompt(self, ticker, company_name, market_label, risk_profile, last_price, ma20, ma60, return_30d, volatility, signals, source, financial_analysis, statement_snapshot):
         signal_block = '\n'.join([f"- {s['title']}: {s['value']} | {s['interpretation']}" for s in signals])
         guidance = get_profile_guidance(risk_profile)
         statement_items = statement_snapshot.get('items') or {}
         statement_block = '\n'.join([f"- {k}: {v}" for k, v in statement_items.items()]) or '- 暂无三张表摘要'
         return f"""
-你正在为 WealthAgent AI 原型撰写一份中文 A 股研究报告。报告应接近机构研究摘要风格，但保持简洁、可读、面向投资者。
+你正在为 WealthAgent AI 原型撰写一份中文{market_label}研究报告。报告应接近机构研究摘要风格，但保持简洁、可读、面向投资者。
 
 股票代码: {ticker}
+市场: {market_label}
 公司: {company_name}
 风险偏好: {risk_profile}
 数据来源: {source}

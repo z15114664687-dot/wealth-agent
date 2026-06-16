@@ -6,7 +6,8 @@ provider = ChinaMarketDataProvider()
 
 @router.get('/history/{ticker}')
 def get_history(ticker: str):
-    df = provider.get_stock_history(ticker.strip())
+    symbol = provider.resolve_symbol(ticker.strip())
+    df = provider.get_stock_history(symbol['display_symbol'])
     source = str(df['source'].iloc[-1])
     history = [
         {
@@ -19,15 +20,17 @@ def get_history(ticker: str):
         }
         for row in df.tail(120).itertuples()
     ]
-    return {'ticker': ticker, 'source': source, 'history': history}
+    return {'ticker': symbol['display_symbol'], 'market': symbol['market'], 'source': source, 'history': history}
 
 @router.get('/snapshot/{ticker}')
 def get_snapshot(ticker: str):
-    df = provider.get_stock_history(ticker.strip())
+    symbol = provider.resolve_symbol(ticker.strip())
+    df = provider.get_stock_history(symbol['display_symbol'])
     close = df['close'].astype(float)
     return {
-        'ticker': ticker,
-        'company_name': provider.get_company_name(ticker),
+        'ticker': symbol['display_symbol'],
+        'market': symbol['market'],
+        'company_name': provider.get_company_name(symbol['display_symbol']),
         'data_source': str(df['source'].iloc[-1]),
         'last_price': round(float(close.iloc[-1]), 2),
         'return_30d': round(float((close.iloc[-1] / close.iloc[max(0, len(close)-30)] - 1) * 100), 2) if len(close) > 30 else 0,

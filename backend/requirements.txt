@@ -3,6 +3,7 @@ uvicorn>=0.30.0
 python-dotenv>=1.0.1
 pandas>=2.2.2
 numpy>=1.26.4
+requests>=2.31.0
 yfinance>=0.2.54
 tushare>=1.4.19
 google-genai>=1.10.0

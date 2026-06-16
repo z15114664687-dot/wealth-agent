@@ -38,7 +38,7 @@ export function ResearchForm({
         </div>
         <div>
           <label className="mb-2 block text-xs font-bold uppercase tracking-[0.16em]">股票代码</label>
-          <Input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="600519" />
+          <Input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="600519 / AAPL / 00700" />
         </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
           <div>

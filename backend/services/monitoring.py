@@ -7,15 +7,17 @@ provider = ChinaMarketDataProvider()
 def analyze_watchlist(tickers: list[str]):
     rows = []
     for ticker in tickers:
-        df = provider.get_stock_history(ticker)
+        symbol = provider.resolve_symbol(ticker)
+        df = provider.get_stock_history(symbol['display_symbol'])
         latest = df.iloc[-1]
         daily_move = float(latest['pct_change'])
         ma20 = float(df['close'].tail(20).mean())
         trend = 'positive' if float(latest['close']) > ma20 else 'mixed'
         alert = 'medium' if abs(daily_move) > 2.5 else 'low' if abs(daily_move) > 1.0 else 'none'
         rows.append({
-            'ticker': ticker,
-            'company_name': provider.get_company_name(ticker),
+            'ticker': symbol['display_symbol'],
+            'market': symbol['market'],
+            'company_name': provider.get_company_name(symbol['display_symbol']),
             'last_price': float(latest['close']),
             'daily_move': daily_move,
             'trend_status': trend,
