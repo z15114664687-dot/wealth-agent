@@ -52,6 +52,31 @@ class DataProviderSymbolResolutionTest(unittest.TestCase):
         yfinance.assert_not_called()
         self.assertEqual(df['source'].iloc[-1], 'yahoo-chart-us')
 
+    def test_global_financial_analysis_uses_key_statistics(self):
+        self.provider._get_global_key_statistics = lambda resolved: {
+            'revenue_growth': 0.051,
+            'gross_margin': 0.462,
+            'profit_margin': 0.264,
+            'return_on_equity': 1.427,
+            'operating_cashflow': 118_000_000_000,
+            'total_debt': 155_000_000_000,
+            'total_cash': 55_000_000_000,
+            'trailing_pe': 31.2,
+            'price_to_book': 48.4,
+            'market_cap': 4_350_000_000_000,
+        }
+
+        with patch.object(self.provider, '_get_global_quote', return_value={}):
+            analysis = self.provider.get_financial_analysis('AAPL')
+
+        self.assertEqual(analysis['revenue_growth'], '5.10%')
+        self.assertEqual(analysis['gross_margin'], '46.20%')
+        self.assertEqual(analysis['net_margin'], '26.40%')
+        self.assertEqual(analysis['roe'], '142.70%')
+        self.assertEqual(analysis['operating_cashflow'], '强')
+        self.assertEqual(analysis['leverage'], '高')
+        self.assertEqual(analysis['source'], 'yahoo-key-statistics')
+
 
 if __name__ == '__main__':
     unittest.main()

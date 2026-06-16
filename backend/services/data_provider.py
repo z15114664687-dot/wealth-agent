@@ -12,6 +12,7 @@ load_dotenv()
 class ChinaMarketDataProvider:
     def __init__(self):
         self.tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
+        self._yahoo_session = None
 
     def resolve_symbol(self, symbol: str) -> Dict[str, str]:
         raw = (symbol or '').strip()
@@ -295,13 +296,29 @@ class ChinaMarketDataProvider:
 
     def _get_global_financial_analysis(self, resolved: Dict[str, str]) -> Dict[str, Any]:
         quote = self._get_global_quote(resolved)
+        stats = self._get_global_key_statistics(resolved)
         market_label = '美股' if resolved['market'] == 'US' else '港股'
-        pe = quote.get('pe')
-        pb = quote.get('pb')
+        pe = stats.get('trailing_pe') or stats.get('forward_pe') or quote.get('pe')
+        pb = stats.get('price_to_book') or quote.get('pb')
         mcap = quote.get('market_cap')
+        yahoo_mcap = stats.get('market_cap')
+        revenue_growth = self._fmt_ratio_pct(stats.get('revenue_growth'))
+        gross_margin = self._fmt_ratio_pct(stats.get('gross_margin'))
+        net_margin = self._fmt_ratio_pct(stats.get('profit_margin'))
+        roe = self._fmt_ratio_pct(stats.get('return_on_equity'))
+        operating_cashflow = self._classify_operating_cashflow(stats.get('operating_cashflow'))
+        leverage = self._classify_global_leverage(stats)
         summary_parts = [
             f'{market_label}标的 {resolved["display_symbol"]} 已按全球市场数据源处理。',
         ]
+        if revenue_growth != 'N/A':
+            summary_parts.append(f'收入增速约 {revenue_growth}。')
+        if gross_margin != 'N/A':
+            summary_parts.append(f'毛利率约 {gross_margin}。')
+        if net_margin != 'N/A':
+            summary_parts.append(f'净利率约 {net_margin}。')
+        if roe != 'N/A':
+            summary_parts.append(f'ROE 约 {roe}。')
         if pe:
             summary_parts.append(f'腾讯财经口径 PE 约 {pe:.2f}。')
         if pb:
@@ -309,35 +326,97 @@ class ChinaMarketDataProvider:
         if mcap:
             unit = '亿美元' if resolved['market'] == 'US' else '亿港元'
             summary_parts.append(f'市值约 {mcap:.2f}{unit}。')
+        elif yahoo_mcap:
+            currency = 'USD' if resolved['market'] == 'US' else 'HKD'
+            summary_parts.append(f'市值约 {self._fmt_large_currency(yahoo_mcap, currency)}。')
         if len(summary_parts) == 1:
             summary_parts.append('实时估值字段暂不可用，报告会以价格历史与公开研究框架为主。')
         return {
-            'revenue_growth': '待验证',
-            'gross_margin': '待验证',
-            'net_margin': '待验证',
-            'roe': '待验证',
-            'operating_cashflow': '待验证',
-            'leverage': '待验证',
+            'revenue_growth': revenue_growth if revenue_growth != 'N/A' else '待验证',
+            'gross_margin': gross_margin if gross_margin != 'N/A' else '待验证',
+            'net_margin': net_margin if net_margin != 'N/A' else '待验证',
+            'roe': roe if roe != 'N/A' else '待验证',
+            'operating_cashflow': operating_cashflow,
+            'leverage': leverage,
             'summary': ''.join(summary_parts),
-            'source': f'global-{resolved["market"].lower()}-quote',
+            'source': 'yahoo-key-statistics' if stats else f'global-{resolved["market"].lower()}-quote',
             'pe': f'{pe:.2f}' if pe else 'N/A',
             'pb': f'{pb:.2f}' if pb else 'N/A',
         }
 
     def _get_global_financial_statement_snapshot(self, resolved: Dict[str, str]) -> Dict[str, Any]:
         quote = self._get_global_quote(resolved)
+        stats = self._get_global_key_statistics(resolved)
         unit = '亿美元' if resolved['market'] == 'US' else '亿港元'
         items = {
             '最新价': self._fmt_optional_number(quote.get('price')),
-            '市值': f"{quote.get('market_cap'):.2f} {unit}" if quote.get('market_cap') else 'N/A',
-            'PE': self._fmt_optional_number(quote.get('pe')),
-            'PB': self._fmt_optional_number(quote.get('pb')),
+            '市值': f"{quote.get('market_cap'):.2f} {unit}" if quote.get('market_cap') else self._fmt_large_currency(stats.get('market_cap'), 'USD' if resolved['market'] == 'US' else 'HKD'),
+            'PE': self._fmt_optional_number(stats.get('trailing_pe') or stats.get('forward_pe') or quote.get('pe')),
+            'PB': self._fmt_optional_number(stats.get('price_to_book') or quote.get('pb')),
+            '总收入': self._fmt_large_currency(stats.get('total_revenue'), 'USD' if resolved['market'] == 'US' else 'HKD'),
+            '总现金': self._fmt_large_currency(stats.get('total_cash'), 'USD' if resolved['market'] == 'US' else 'HKD'),
+            '总债务': self._fmt_large_currency(stats.get('total_debt'), 'USD' if resolved['market'] == 'US' else 'HKD'),
         }
         return {
-            'source': f'global-{resolved["market"].lower()}-quote',
+            'source': 'yahoo-key-statistics' if stats else f'global-{resolved["market"].lower()}-quote',
             'latest_report': None,
             'items': items,
         }
+
+    def _get_global_key_statistics(self, resolved: Dict[str, str]) -> Dict[str, Any]:
+        try:
+            data = self._yahoo_quote_summary(resolved['yahoo_symbol'], ['financialData', 'defaultKeyStatistics', 'summaryDetail'])
+        except Exception as e:
+            print(f'[WARN] Yahoo key statistics failed for {resolved["display_symbol"]}: {e}')
+            return {}
+
+        financial_data = data.get('financialData', {})
+        key_stats = data.get('defaultKeyStatistics', {})
+        summary_detail = data.get('summaryDetail', {})
+        return {
+            'current_price': self._raw_value(financial_data, 'currentPrice'),
+            'target_mean': self._raw_value(financial_data, 'targetMeanPrice'),
+            'recommendation': financial_data.get('recommendationKey'),
+            'trailing_pe': self._raw_value(summary_detail, 'trailingPE'),
+            'forward_pe': self._raw_value(key_stats, 'forwardPE'),
+            'peg_ratio': self._raw_value(key_stats, 'pegRatio'),
+            'price_to_book': self._raw_value(key_stats, 'priceToBook'),
+            'ev_to_ebitda': self._raw_value(key_stats, 'enterpriseToEbitda'),
+            'gross_margin': self._raw_value(financial_data, 'grossMargins'),
+            'profit_margin': self._raw_value(key_stats, 'profitMargins'),
+            'operating_margin': self._raw_value(financial_data, 'operatingMargins'),
+            'return_on_equity': self._raw_value(financial_data, 'returnOnEquity'),
+            'return_on_assets': self._raw_value(financial_data, 'returnOnAssets'),
+            'earnings_growth': self._raw_value(financial_data, 'earningsGrowth'),
+            'revenue_growth': self._raw_value(financial_data, 'revenueGrowth'),
+            'market_cap': self._raw_value(summary_detail, 'marketCap'),
+            'total_revenue': self._raw_value(financial_data, 'totalRevenue'),
+            'total_cash': self._raw_value(financial_data, 'totalCash'),
+            'total_debt': self._raw_value(financial_data, 'totalDebt'),
+            'debt_to_equity': self._raw_value(financial_data, 'debtToEquity'),
+            'operating_cashflow': self._raw_value(financial_data, 'operatingCashflow'),
+        }
+
+    def _yahoo_quote_summary(self, symbol: str, modules: list) -> Dict[str, Any]:
+        session = self._get_yahoo_session()
+        url = f'https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}'
+        r = session.get(url, params={'modules': ','.join(modules), 'crumb': session._crumb}, timeout=15)
+        r.raise_for_status()
+        results = r.json().get('quoteSummary', {}).get('result') or []
+        return results[0] if results else {}
+
+    def _get_yahoo_session(self) -> requests.Session:
+        if self._yahoo_session and hasattr(self._yahoo_session, '_crumb'):
+            return self._yahoo_session
+
+        session = requests.Session()
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'})
+        session.get('https://fc.yahoo.com', timeout=10)
+        crumb_response = session.get('https://query2.finance.yahoo.com/v1/test/getcrumb', timeout=10)
+        crumb_response.raise_for_status()
+        session._crumb = crumb_response.text
+        self._yahoo_session = session
+        return session
 
     def _get_global_company_profile(self, resolved: Dict[str, str], financial_analysis: Dict[str, Any]) -> Dict[str, Any]:
         quote = self._get_global_quote(resolved)
@@ -599,10 +678,30 @@ class ChinaMarketDataProvider:
             return 'N/A'
         return f'{float(value):.2f}%'
 
+    def _fmt_ratio_pct(self, value) -> str:
+        number = self._safe_float(value)
+        if number is None:
+            return 'N/A'
+        if abs(number) <= 2:
+            number *= 100
+        return f'{number:.2f}%'
+
     def _fmt_number(self, value) -> str:
         if value is None or pd.isna(value):
             return 'N/A'
         return f'{float(value):.2f}'
+
+    def _fmt_large_currency(self, value, currency: str) -> str:
+        number = self._safe_float(value)
+        if number is None:
+            return 'N/A'
+        if abs(number) >= 1e12:
+            return f'{number / 1e12:.2f} 万亿 {currency}'
+        if abs(number) >= 1e9:
+            return f'{number / 1e9:.2f} 十亿 {currency}'
+        if abs(number) >= 1e6:
+            return f'{number / 1e6:.2f} 百万 {currency}'
+        return f'{number:.2f} {currency}'
 
     def _fmt_optional_number(self, value) -> str:
         if value is None:
@@ -626,6 +725,12 @@ class ChinaMarketDataProvider:
         if not values or index >= len(values):
             return None
         return values[index]
+
+    def _raw_value(self, data: Dict[str, Any], key: str):
+        value = data.get(key)
+        if isinstance(value, dict):
+            return value.get('raw')
+        return value
 
     def _fmt_money(self, value) -> str:
         if value is None or pd.isna(value):
@@ -657,7 +762,7 @@ class ChinaMarketDataProvider:
         if value is None:
             return None
         text = str(value).replace('%', '').strip()
-        if text in {'', 'N/A', '待接入'}:
+        if text in {'', 'N/A', '待接入', '待验证'}:
             return None
         try:
             return float(text)
@@ -681,5 +786,27 @@ class ChinaMarketDataProvider:
         if ratio < 35:
             return '低'
         if ratio < 65:
+            return '中等'
+        return '高'
+
+    def _classify_global_leverage(self, stats: Dict[str, Any]) -> str:
+        debt_to_equity = self._safe_float(stats.get('debt_to_equity'))
+        if debt_to_equity is not None:
+            if debt_to_equity < 80:
+                return '低'
+            if debt_to_equity < 180:
+                return '中等'
+            return '高'
+
+        debt = self._safe_float(stats.get('total_debt'))
+        cash = self._safe_float(stats.get('total_cash'))
+        if debt is None:
+            return '待验证'
+        if not cash or cash <= 0:
+            return '高' if debt > 0 else '低'
+        ratio = debt / cash
+        if ratio < 1:
+            return '低'
+        if ratio < 2.5:
             return '中等'
         return '高'
