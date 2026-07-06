@@ -1,5 +1,8 @@
+import logging
 import os
 import re
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 import numpy as np
@@ -9,10 +12,38 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class ChinaMarketDataProvider:
+logger = logging.getLogger(__name__)
+
+QUOTE_CACHE_SECONDS = 300
+FUNDAMENTALS_CACHE_SECONDS = 3600
+
+
+class _TTLCache:
+    def __init__(self):
+        self._data: Dict[Any, Any] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return None
+            expires_at, value = entry
+            if time.monotonic() > expires_at:
+                del self._data[key]
+                return None
+            return value
+
+    def set(self, key, value, ttl_seconds: float):
+        with self._lock:
+            self._data[key] = (time.monotonic() + ttl_seconds, value)
+
+
+class MarketDataProvider:
     def __init__(self):
         self.tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
         self._yahoo_session = None
+        self._cache = _TTLCache()
 
     def resolve_symbol(self, symbol: str) -> Dict[str, str]:
         raw = (symbol or '').strip()
@@ -80,6 +111,16 @@ class ChinaMarketDataProvider:
         end = pd.Timestamp(end_date) if end_date else pd.Timestamp.today().normalize()
         start = pd.Timestamp(start_date) if start_date else end - pd.Timedelta(days=180)
 
+        cache_key = ('history', resolved['display_symbol'], str(start.date()), str(end.date()))
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+        df = self._fetch_stock_history(resolved, start, end)
+        self._cache.set(cache_key, df, QUOTE_CACHE_SECONDS)
+        return df.copy()
+
+    def _fetch_stock_history(self, resolved: Dict[str, str], start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         if resolved['market'] != 'CN':
             try:
                 df = self._get_history_from_yahoo_chart(resolved, start, end)
@@ -87,7 +128,7 @@ class ChinaMarketDataProvider:
                     df['source'] = f"yahoo-chart-{resolved['market'].lower()}"
                     return df
             except Exception as e:
-                print(f'[WARN] Yahoo chart failed for {symbol}: {e}')
+                logger.warning('Yahoo chart failed for %s: %s', resolved['display_symbol'], e)
 
             df = self._get_mock_history(resolved['display_symbol'], start, end, resolved['market'])
             df['source'] = f'mock-{resolved["market"].lower()}'
@@ -100,7 +141,7 @@ class ChinaMarketDataProvider:
                 df['source'] = 'tushare'
                 return df
         except Exception as e:
-            print(f'[WARN] Tushare failed for {symbol}: {e}')
+            logger.warning('Tushare failed for %s: %s', symbol, e)
 
         try:
             df = self._get_history_from_yfinance(symbol, start, end)
@@ -108,7 +149,7 @@ class ChinaMarketDataProvider:
                 df['source'] = 'yfinance'
                 return df
         except Exception as e:
-            print(f'[WARN] yfinance failed for {symbol}: {e}')
+            logger.warning('yfinance failed for %s: %s', symbol, e)
 
         df = self._get_mock_history(symbol, start, end, 'CN')
         df['source'] = 'mock'
@@ -116,37 +157,98 @@ class ChinaMarketDataProvider:
 
     def get_company_name(self, symbol: str) -> str:
         resolved = self.resolve_symbol(symbol)
+        cache_key = ('company_name', resolved['display_symbol'])
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         if resolved['market'] != 'CN':
             quote = self._get_global_quote(resolved)
-            if quote.get('name'):
-                return quote['name']
-            mapping = {
-                'AAPL': 'Apple Inc.',
-                'MSFT': 'Microsoft',
-                'TSLA': 'Tesla',
-                'NVDA': 'NVIDIA',
-                'BABA': 'Alibaba',
-                '00700.HK': '腾讯控股',
-                '09988.HK': '阿里巴巴-W',
-            }
-            return mapping.get(resolved['display_symbol'], resolved['display_symbol'])
+            name = quote.get('name') or resolved['display_symbol']
+        else:
+            name = self._get_cn_company_name(resolved['normalized'])
 
-        symbol = resolved['normalized']
-        mapping = {'600519': '贵州茅台', '300750': '宁德时代', '000001': '平安银行', '600036': '招商银行', '601899': '紫金矿业', '002594': '比亚迪'}
-        return mapping.get(symbol, f'A-Share {symbol}')
+        self._cache.set(cache_key, name, FUNDAMENTALS_CACHE_SECONDS)
+        return name
+
+    def _get_cn_company_name(self, symbol: str) -> str:
+        info = self._get_individual_info_dict_from_akshare(symbol)
+        raw_name = info.get('股票简称')
+        if raw_name is not None and pd.notna(raw_name) and str(raw_name).strip():
+            return str(raw_name).strip()
+
+        name = self._get_cn_name_map_from_tushare().get(symbol)
+        return name or f'A-Share {symbol}'
+
+    def _get_cn_name_map_from_tushare(self) -> Dict[str, str]:
+        cache_key = ('cn_name_map',)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        name_map: Dict[str, str] = {}
+        if self.tushare_token:
+            try:
+                import tushare as ts
+                pro = ts.pro_api(self.tushare_token)
+                # One bulk call for the whole market; stock_basic is rate-limited per call, not by rows.
+                df = pro.stock_basic(fields='symbol,name')
+                if df is not None and not df.empty:
+                    name_map = {str(row.symbol): str(row.name) for row in df.itertuples()}
+                    self._save_cn_name_map(name_map)
+            except Exception as e:
+                logger.warning('Tushare stock_basic name map failed: %s', e)
+
+        if not name_map:
+            # stock_basic allows one call per hour; stale names from disk are fine.
+            name_map = self._load_cn_name_map()
+
+        # Cache failures briefly too, to avoid hammering the rate-limited endpoint.
+        self._cache.set(cache_key, name_map, 86400 if name_map else 600)
+        return name_map
+
+    def _cn_name_map_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.cache', 'cn_names.json')
+
+    def _save_cn_name_map(self, name_map: Dict[str, str]):
+        import json
+        try:
+            path = self._cn_name_map_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(name_map, f, ensure_ascii=False)
+        except OSError as e:
+            logger.warning('Failed to persist CN name map: %s', e)
+
+    def _load_cn_name_map(self) -> Dict[str, str]:
+        import json
+        try:
+            with open(self._cn_name_map_path(), encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
 
     def get_company_profile(self, symbol: str, financial_analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         resolved = self.resolve_symbol(symbol)
+        cache_key = ('company_profile', resolved['display_symbol'])
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         if resolved['market'] != 'CN':
-            return self._get_global_company_profile(resolved, financial_analysis or {})
+            profile = self._get_global_company_profile(resolved, financial_analysis or {})
+            self._cache.set(cache_key, profile, FUNDAMENTALS_CACHE_SECONDS)
+            return profile
 
         symbol = resolved['normalized']
         try:
             profile = self._get_company_profile_from_akshare(symbol, financial_analysis or {})
             if profile:
+                self._cache.set(cache_key, profile, FUNDAMENTALS_CACHE_SECONDS)
                 return profile
         except Exception as e:
-            print(f'[WARN] AKShare company profile failed for {symbol}: {e}')
+            logger.warning('AKShare company profile failed for %s: %s', symbol, e)
 
         return {
             'sector': 'A 股 / 综合',
@@ -165,16 +267,24 @@ class ChinaMarketDataProvider:
 
     def get_financial_analysis(self, symbol: str) -> Dict[str, Any]:
         resolved = self.resolve_symbol(symbol)
+        cache_key = ('financial_analysis', resolved['display_symbol'])
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         if resolved['market'] != 'CN':
-            return self._get_global_financial_analysis(resolved)
+            analysis = self._get_global_financial_analysis(resolved)
+            self._cache.set(cache_key, analysis, FUNDAMENTALS_CACHE_SECONDS)
+            return analysis
 
         symbol = resolved['normalized']
         try:
             indicators = self._get_financial_indicators_from_akshare(symbol)
             if indicators:
+                self._cache.set(cache_key, indicators, FUNDAMENTALS_CACHE_SECONDS)
                 return indicators
         except Exception as e:
-            print(f'[WARN] AKShare financial indicators failed for {symbol}: {e}')
+            logger.warning('AKShare financial indicators failed for %s: %s', symbol, e)
 
         return {
             'revenue_growth': '待接入',
@@ -189,27 +299,44 @@ class ChinaMarketDataProvider:
 
     def get_financial_statement_snapshot(self, symbol: str) -> Dict[str, Any]:
         resolved = self.resolve_symbol(symbol)
+        cache_key = ('statement_snapshot', resolved['display_symbol'])
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         if resolved['market'] != 'CN':
-            return self._get_global_financial_statement_snapshot(resolved)
+            snapshot = self._get_global_financial_statement_snapshot(resolved)
+            self._cache.set(cache_key, snapshot, FUNDAMENTALS_CACHE_SECONDS)
+            return snapshot
 
         symbol = resolved['normalized']
         try:
-            return self._get_financial_statement_snapshot_from_akshare(symbol)
+            snapshot = self._get_financial_statement_snapshot_from_akshare(symbol)
+            self._cache.set(cache_key, snapshot, FUNDAMENTALS_CACHE_SECONDS)
+            return snapshot
         except Exception as e:
-            print(f'[WARN] AKShare financial statements failed for {symbol}: {e}')
+            logger.warning('AKShare financial statements failed for %s: %s', symbol, e)
             return {'source': 'fallback', 'latest_report': None, 'items': {}}
 
+    def _cn_exchange(self, symbol: str) -> str:
+        if symbol.startswith('92') or symbol.startswith(('4', '8')):
+            return 'BJ'
+        if symbol.startswith(('5', '6', '9')):
+            return 'SH'
+        return 'SZ'
+
     def _to_tushare_code(self, symbol: str) -> str:
-        return f'{symbol}.SH' if symbol.startswith(('5', '6', '9')) else f'{symbol}.SZ'
+        return f'{symbol}.{self._cn_exchange(symbol)}'
 
     def _to_yahoo_code(self, symbol: str) -> str:
-        return f'{symbol}.SS' if symbol.startswith(('5', '6', '9')) else f'{symbol}.SZ'
+        suffix = {'SH': 'SS', 'SZ': 'SZ', 'BJ': 'BJ'}[self._cn_exchange(symbol)]
+        return f'{symbol}.{suffix}'
 
     def _to_em_code(self, symbol: str) -> str:
-        return f'{symbol}.SH' if symbol.startswith(('5', '6', '9')) else f'{symbol}.SZ'
+        return self._to_tushare_code(symbol)
 
     def _to_sina_code(self, symbol: str) -> str:
-        return f'sh{symbol}' if symbol.startswith(('5', '6', '9')) else f'sz{symbol}'
+        return f'{self._cn_exchange(symbol).lower()}{symbol}'
 
     def _get_history_from_yahoo_chart(self, resolved: Dict[str, str], start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         period1 = int(start.timestamp())
@@ -243,14 +370,25 @@ class ChinaMarketDataProvider:
         return df[['date', 'open', 'high', 'low', 'close', 'volume', 'pct_change', 'turnover']]
 
     def _get_global_quote(self, resolved: Dict[str, str]) -> Dict[str, Any]:
+        cache_key = ('global_quote', resolved['display_symbol'])
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         try:
             if resolved['market'] == 'US':
-                return self._get_us_quote_tencent(resolved['normalized'])
-            if resolved['market'] == 'HK':
-                return self._get_hk_quote_tencent(resolved['hk_code'])
+                quote = self._get_us_quote_tencent(resolved['normalized'])
+            elif resolved['market'] == 'HK':
+                quote = self._get_hk_quote_tencent(resolved['hk_code'])
+            else:
+                quote = {}
         except Exception as e:
-            print(f'[WARN] Tencent global quote failed for {resolved["display_symbol"]}: {e}')
-        return {}
+            logger.warning('Tencent global quote failed for %s: %s', resolved['display_symbol'], e)
+            return {}
+
+        if quote:
+            self._cache.set(cache_key, quote, QUOTE_CACHE_SECONDS)
+        return quote
 
     def _get_us_quote_tencent(self, ticker: str) -> Dict[str, Any]:
         url = f'https://qt.gtimg.cn/q=us{ticker.upper()}'
@@ -364,16 +502,21 @@ class ChinaMarketDataProvider:
         }
 
     def _get_global_key_statistics(self, resolved: Dict[str, str]) -> Dict[str, Any]:
+        cache_key = ('key_statistics', resolved['display_symbol'])
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         try:
             data = self._yahoo_quote_summary(resolved['yahoo_symbol'], ['financialData', 'defaultKeyStatistics', 'summaryDetail'])
         except Exception as e:
-            print(f'[WARN] Yahoo key statistics failed for {resolved["display_symbol"]}: {e}')
+            logger.warning('Yahoo key statistics failed for %s: %s', resolved['display_symbol'], e)
             return {}
 
         financial_data = data.get('financialData', {})
         key_stats = data.get('defaultKeyStatistics', {})
         summary_detail = data.get('summaryDetail', {})
-        return {
+        stats = {
             'current_price': self._raw_value(financial_data, 'currentPrice'),
             'target_mean': self._raw_value(financial_data, 'targetMeanPrice'),
             'recommendation': financial_data.get('recommendationKey'),
@@ -396,14 +539,23 @@ class ChinaMarketDataProvider:
             'debt_to_equity': self._raw_value(financial_data, 'debtToEquity'),
             'operating_cashflow': self._raw_value(financial_data, 'operatingCashflow'),
         }
+        self._cache.set(cache_key, stats, QUOTE_CACHE_SECONDS)
+        return stats
 
     def _yahoo_quote_summary(self, symbol: str, modules: list) -> Dict[str, Any]:
-        session = self._get_yahoo_session()
         url = f'https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}'
-        r = session.get(url, params={'modules': ','.join(modules), 'crumb': session._crumb}, timeout=15)
-        r.raise_for_status()
-        results = r.json().get('quoteSummary', {}).get('result') or []
-        return results[0] if results else {}
+        for attempt in range(2):
+            session = self._get_yahoo_session()
+            r = session.get(url, params={'modules': ','.join(modules), 'crumb': session._crumb}, timeout=15)
+            # Yahoo crumbs expire; rebuild the session once before giving up.
+            if r.status_code in (401, 403) and attempt == 0:
+                logger.warning('Yahoo session expired (%s), rebuilding session', r.status_code)
+                self._yahoo_session = None
+                continue
+            r.raise_for_status()
+            results = r.json().get('quoteSummary', {}).get('result') or []
+            return results[0] if results else {}
+        return {}
 
     def _get_yahoo_session(self) -> requests.Session:
         if self._yahoo_session and hasattr(self._yahoo_session, '_crumb'):
@@ -599,17 +751,24 @@ class ChinaMarketDataProvider:
     def _get_individual_info_dict_from_akshare(self, symbol: str) -> Dict[str, Any]:
         import akshare as ak
 
+        cache_key = ('individual_info', symbol)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         last_error = None
         for _ in range(2):
             try:
                 df = ak.stock_individual_info_em(symbol=symbol)
                 if df is None or df.empty:
                     continue
-                return {str(row['item']): row['value'] for _, row in df.iterrows()}
+                info = {str(row['item']): row['value'] for _, row in df.iterrows()}
+                self._cache.set(cache_key, info, FUNDAMENTALS_CACHE_SECONDS)
+                return info
             except Exception as e:
                 last_error = e
         if last_error:
-            print(f'[WARN] AKShare individual info failed for {symbol}: {last_error}')
+            logger.warning('AKShare individual info failed for %s: %s', symbol, last_error)
         return {}
 
     def _build_company_description(self, company_name, industry: str, main_business, org_intro) -> str:
@@ -810,3 +969,7 @@ class ChinaMarketDataProvider:
         if ratio < 2.5:
             return '中等'
         return '高'
+
+
+# Shared instance so all routers/services reuse one cache and one Yahoo session.
+provider = MarketDataProvider()

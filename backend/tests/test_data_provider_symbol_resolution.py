@@ -3,17 +3,24 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from services.data_provider import ChinaMarketDataProvider
+from services.data_provider import MarketDataProvider
 
 
 class DataProviderSymbolResolutionTest(unittest.TestCase):
     def setUp(self):
-        self.provider = ChinaMarketDataProvider()
+        self.provider = MarketDataProvider()
 
     def test_resolves_a_share_codes(self):
         self.assertEqual(self.provider.resolve_symbol('600519')['market'], 'CN')
         self.assertEqual(self.provider.resolve_symbol('600519')['display_symbol'], '600519')
         self.assertEqual(self.provider.resolve_symbol('600519.SH')['yahoo_symbol'], '600519.SS')
+
+    def test_maps_beijing_exchange_codes(self):
+        self.assertEqual(self.provider._to_tushare_code('830799'), '830799.BJ')
+        self.assertEqual(self.provider._to_tushare_code('430047'), '430047.BJ')
+        self.assertEqual(self.provider._to_tushare_code('920001'), '920001.BJ')
+        self.assertEqual(self.provider._to_tushare_code('900901'), '900901.SH')
+        self.assertEqual(self.provider._to_tushare_code('000001'), '000001.SZ')
 
     def test_resolves_us_tickers_without_a_share_suffix(self):
         resolved = self.provider.resolve_symbol('aapl')

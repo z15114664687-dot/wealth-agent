@@ -1,9 +1,12 @@
+import logging
 import os
 import json
 import re
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class GeminiReportClient:
     def __init__(self):
@@ -24,7 +27,7 @@ class GeminiReportClient:
                 response = self._client.models.generate_content(model=self.model, contents=prompt)
                 return (response.text or '').strip()
             except Exception as e:
-                print(f'[WARN] Gemini report generation failed: {e}')
+                logger.warning('Gemini report generation failed: %s', e)
         return self._fallback(prompt)
 
     def generate_json(self, prompt: str) -> dict:
@@ -33,7 +36,7 @@ class GeminiReportClient:
                 response = self._client.models.generate_content(model=self.model, contents=prompt)
                 return self._parse_json(response.text or '')
             except Exception as e:
-                print(f'[WARN] Gemini JSON generation failed: {e}')
+                logger.warning('Gemini JSON generation failed: %s', e)
         return {}
 
     def _parse_json(self, text: str) -> dict:

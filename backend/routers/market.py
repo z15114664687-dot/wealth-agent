@@ -1,8 +1,7 @@
 from fastapi import APIRouter
-from services.data_provider import ChinaMarketDataProvider
+from services.data_provider import provider
 
 router = APIRouter(prefix='/api/market', tags=['market'])
-provider = ChinaMarketDataProvider()
 
 @router.get('/history/{ticker}')
 def get_history(ticker: str):
