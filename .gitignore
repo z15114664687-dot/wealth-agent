@@ -24,3 +24,6 @@ out/
 *.tsbuildinfo
 coverage/
 .pytest_cache/
+
+# Local data caches
+backend/.cache/

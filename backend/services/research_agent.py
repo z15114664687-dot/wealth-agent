@@ -1,19 +1,33 @@
+import logging
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
-from services.data_provider import ChinaMarketDataProvider
+from services.data_provider import provider
 from services.gemini_report_client import GeminiReportClient
 from services.personalization import get_profile_guidance
 
+logger = logging.getLogger(__name__)
+
 class ResearchAgentOrchestrator:
     def __init__(self):
-        self.provider = ChinaMarketDataProvider()
+        self.provider = provider
         self.report_client = GeminiReportClient()
 
     def run(self, ticker: str, risk_profile: str):
         symbol = self.provider.resolve_symbol(ticker)
         display_ticker = symbol['display_symbol']
         market_label = self._market_label(symbol['market'])
-        df = self.provider.get_stock_history(display_ticker)
-        company_name = self.provider.get_company_name(display_ticker)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            history_future = pool.submit(self.provider.get_stock_history, display_ticker)
+            name_future = pool.submit(self.provider.get_company_name, display_ticker)
+            analysis_future = pool.submit(self.provider.get_financial_analysis, display_ticker)
+            statement_future = pool.submit(self.provider.get_financial_statement_snapshot, display_ticker)
+            df = history_future.result()
+            company_name = name_future.result()
+            financial_analysis = analysis_future.result()
+            financial_statement_snapshot = statement_future.result()
+
         close = df['close'].astype(float)
         last_price = float(close.iloc[-1])
         ma20 = float(close.tail(20).mean())
@@ -21,8 +35,6 @@ class ResearchAgentOrchestrator:
         return_30d = float((close.iloc[-1] / close.iloc[max(0, len(close)-30)] - 1) * 100) if len(close) > 30 else float(close.pct_change().tail(30).sum() * 100)
         volatility = float(close.pct_change().dropna().std() * np.sqrt(252) * 100)
         source = str(df['source'].iloc[-1])
-        financial_analysis = self.provider.get_financial_analysis(display_ticker)
-        financial_statement_snapshot = self.provider.get_financial_statement_snapshot(display_ticker)
         company_profile = self.provider.get_company_profile(display_ticker, financial_analysis)
         fundamental_analysis = self._build_fundamental_analysis(company_name, financial_analysis, financial_statement_snapshot)
 
@@ -145,7 +157,7 @@ class ResearchAgentOrchestrator:
         try:
             payload = self.report_client.generate_json(prompt)
         except Exception as e:
-            print(f'[WARN] Gemini competitive landscape completion failed for {ticker}: {e}')
+            logger.warning('Gemini competitive landscape completion failed for %s: %s', ticker, e)
             payload = {}
         normalized = self._normalize_competitive_landscape(payload)
         if normalized:
